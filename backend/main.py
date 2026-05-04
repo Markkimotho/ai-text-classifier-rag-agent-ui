@@ -1,8 +1,15 @@
 import shutil
+import time
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel, field_validator
+from prometheus_client import (
+    Counter,
+    Histogram,
+    generate_latest,
+    CONTENT_TYPE_LATEST,
+)
 
 from classifier import classify
 import rag as rag_module
@@ -11,14 +18,44 @@ from agent import run_agent
 UPLOAD_DIR = Path(__file__).parent / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
 
-ALLOWED_TYPES = {
-    "application/pdf",
-    "text/plain",
-    "application/octet-stream",  # Some clients send this for .txt
-}
 ALLOWED_EXTENSIONS = {".pdf", ".txt"}
 
 app = FastAPI(title="AI Text Classifier + RAG Agent API", version="3.0.0")
+
+# ---------- Prometheus metrics ----------
+
+REQUEST_COUNT = Counter(
+    "http_requests_total",
+    "Total HTTP requests",
+    ["endpoint", "method"],
+)
+REQUEST_LATENCY = Histogram(
+    "http_request_duration_seconds",
+    "HTTP request duration in seconds",
+    ["endpoint"],
+)
+ERROR_COUNT = Counter(
+    "http_errors_total",
+    "Total HTTP errors",
+    ["endpoint", "status_code"],
+)
+
+
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    endpoint = request.url.path
+    method = request.method
+    start = time.perf_counter()
+
+    response = await call_next(request)
+
+    duration = time.perf_counter() - start
+    REQUEST_COUNT.labels(endpoint=endpoint, method=method).inc()
+    REQUEST_LATENCY.labels(endpoint=endpoint).observe(duration)
+    if response.status_code >= 400:
+        ERROR_COUNT.labels(endpoint=endpoint, status_code=str(response.status_code)).inc()
+
+    return response
 
 
 # ---------- Request / Response models ----------
@@ -67,6 +104,11 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/metrics")
+def metrics():
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
 @app.post("/classify", response_model=ClassifyResponse)
 def classify_text(body: ClassifyRequest):
     category, confidence = classify(body.text)
@@ -77,7 +119,10 @@ def classify_text(body: ClassifyRequest):
 async def upload_file(file: UploadFile = File(...)):
     suffix = Path(file.filename).suffix.lower()
     if suffix not in ALLOWED_EXTENSIONS:
-        raise HTTPException(status_code=400, detail=f"Unsupported file type: {suffix}. Only .pdf and .txt are allowed.")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type: {suffix}. Only .pdf and .txt are allowed.",
+        )
 
     save_path = UPLOAD_DIR / file.filename
     with save_path.open("wb") as f:
