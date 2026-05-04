@@ -6,6 +6,7 @@ from pydantic import BaseModel, field_validator
 
 from classifier import classify
 import rag as rag_module
+from agent import run_agent
 
 UPLOAD_DIR = Path(__file__).parent / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
@@ -17,7 +18,7 @@ ALLOWED_TYPES = {
 }
 ALLOWED_EXTENSIONS = {".pdf", ".txt"}
 
-app = FastAPI(title="AI Text Classifier + RAG API", version="2.0.0")
+app = FastAPI(title="AI Text Classifier + RAG Agent API", version="3.0.0")
 
 
 # ---------- Request / Response models ----------
@@ -88,9 +89,12 @@ async def upload_file(file: UploadFile = File(...)):
 
 @app.post("/ask", response_model=AskResponse)
 def ask_question(body: AskRequest):
-    chunks = rag_module.retrieve(body.question)
-    answer = rag_module.generate_answer(body.question, chunks)
-    return AskResponse(answer=answer, sources=chunks)
+    result = run_agent(body.question)
+    return AskResponse(
+        answer=result["answer"],
+        sources=result["sources"],
+        tool_trace=result["tool_trace"],
+    )
 
 
 @app.get("/documents", response_model=DocumentsResponse)
